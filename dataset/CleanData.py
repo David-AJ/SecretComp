@@ -2,7 +2,9 @@
 import pandas as pd 
 import numpy as np
 import pickle
-
+from sklearn.preprocessing import OneHotEncoder,LabelBinarizer
+from sklearn.linear_model import Lasso
+import matplotlib.pyplot as plt
 # 如果csv文件无列标题,即第一行为数据
 # 参数加 header = None声明无标题 
 # 或加 names = [str1,str2,str3,...]自定义标题
@@ -22,10 +24,23 @@ view.to_csv('view_sorted.txt',index=False)
 # view per day
 view.date = view.date.str[0:-9]
 vpd = view.groupby(['sid','date']).size()
-# 移动平均值
-vmean = vpd.rolling(7).mean()
+# view windows sum
+for i in vpd.index.levels[0]:
+	p = vpd.loc[i]
+	idx = pd.MultiIndex.from_arrays([np.random.randint(i,i+1,len(vpd.loc[i])),vpd.loc[i].index],names=('sid','date'))
+	if i==1:
+		shovpd = pd.concat([pd.rolling_sum(p,3),pd.rolling_sum(p,5),pd.rolling_sum(p,7),\
+		pd.rolling_sum(p,9),pd.rolling_sum(p,11),pd.rolling_sum(p,13),\
+		pd.rolling_sum(p,15)],axis=1)
+		shovpd.index = idx 
+	else:
+		temp = pd.concat([pd.rolling_sum(p,3),pd.rolling_sum(p,5),pd.rolling_sum(p,7),\
+    	pd.rolling_sum(p,9),pd.rolling_sum(p,11),pd.rolling_sum(p,13),\
+    	pd.rolling_sum(p,15)],axis=1)
+    	temp.index = idx
+		shovpd = shovpd.append(temp)
 # view prediction using VAR model
-
+shovpd = shovpd.dropna()
 
 
 # shop
@@ -74,6 +89,24 @@ p_date = ppd.index.levels[1].tolist()
 # # 下次读取时，由于第0,1列为index
 # # 加参数index_col=[0,1]
 # ppd = pd.read_csv('pay_per_day2.txt',index_col=[0,1],names=['sid','date','pay'])
+for i in ppd.index.levels[0]:
+	p = ppd.loc[i]
+	idx = pd.MultiIndex.from_arrays([np.random.randint(i,i+1,len(ppd.loc[i])),ppd.loc[i].index],names=('sid','date'))
+	if i==1:
+		shoppd = pd.concat([pd.rolling_mean(p,3).shift(1),pd.rolling_mean(p,5).shift(1),pd.rolling_mean(p,7).shift(1),\
+		pd.rolling_mean(p,9).shift(1),pd.rolling_mean(p,11).shift(1),pd.rolling_mean(p,13).shift(1),\
+		pd.rolling_mean(p,15).shift(1)],axis=1)
+		shoppd.index = idx 
+    else:
+		temp = pd.concat([pd.rolling_mean(p,3).shift(1),pd.rolling_mean(p,5).shift(1),pd.rolling_mean(p,7).shift(1),\
+    	pd.rolling_mean(p,9).shift(1),pd.rolling_mean(p,11).shift(1),pd.rolling_mean(p,13).shift(1),\
+    	pd.rolling_mean(p,15).shift(1)],axis=1)
+    	temp.index = idx
+    	shoppd = shoppd.append(temp)
+
+shoppd = shoppd.dropna()
+
+
 
 # holiday
 h = pd.read_csv('holiday.csv')
@@ -88,6 +121,20 @@ holiday = h_train.append(h_predict)
 holiday.index = holiday.date
 holiday = holiday.drop('date',axis=1)
 holiday = holiday.astype(int) 
+holiday = holiday.replace(2,1)
+# 0->工作日00000 1->放假00001 2->第一工作日00010 3->最后工作日00100 4->第一放假01000 5->最后放假10000
+h = holiday.as_matrix()
+for i in range(len(h)):
+	if h[i-1]&i<len(h):
+		if h[i]==0:
+			if h[i-1]==1:
+				h[i]=2
+				h[i-1]=5
+			elif h[i+1]==1:
+				h[i]=3
+				h[i+1]=4
+enc = OneHotEncoder()
+holiday.holiday = enc.fit_transform(h).toarray().tolist()
 holiday.to_csv('h_day.csv')
 
 # weather
@@ -96,20 +143,15 @@ w = w.drop('wind',axis=1)
 w.date = w.date.astype(str)
 # 筛选出与测试城市日期有关的数据  p_date缺少预测日期
 w = w[w.city.isin(citymap.keys())&w.date.isin(p_date)]
-w.windl = w.windl.fillna(u'无')
+w = w.fillna(u'无')
 w.city = w.apply(lambda x: citymap[x.city],axis=1)
 
-# 温度求平均
-w.high = w.apply(lambda x: (x.high+x.low)/2.0,axis=1)
-w = w.drop('low',axis=1)
-
-weather = w.weather.value_counts().index.tolist()
-weathermap = {weather[i]:i for i in range(len(weather))}
+w.weather = LabelBinarizer().fit_transform(w.weather).tolist()
 
 windl = w.windl.value_counts().index.tolist()
 windlmap = {windl[i]:i for i in range(len(windl))}
 
-w.weather = w.apply(lambda x: weathermap[x.weather],axis=1)
+
 w.windl = w.apply(lambda x: windlmap[x.windl],axis=1)
 
 w.index = [w.city,w.date]
@@ -129,25 +171,34 @@ f.close()
 f2.close()
 
 
-# create dataset
-def creatData(ppd):
-	X=[]
-	for sid,date in ppd.index:
+
+def createData(ppd,shovpd,shoppd):
+	shoppd = shoppd[shoppd.index.isin(shovpd.index)]
+	X = []
+	Y = []
+	for sid,date in shoppd.index:
 		temp = [i for i in shop[sid-1]]
 		# temp = [float(sid)]
-		temp.extend(w.loc[shop[sid-1][0],date].as_matrix())
-		temp.extend(holiday.loc[date].as_matrix())
+		weather = w.loc[shop[sid-1][0],date].as_matrix()
+		temp.extend(weather[0:2])
+		temp.extend(weather[2])
+		temp.extend([weather[3]])
+		temp.extend(holiday.loc[date].as_matrix()[0])
+		temp.extend(shovpd.loc[sid,date].as_matrix())
+		temp.extend(shoppd.loc[sid,date].as_matrix())
 		X.append(temp)
-	temp = ppd.astype(int).as_matrix()
-	temp = temp.reshape(1,temp.size)
-	Y=temp[0]
-	return np.array(X),Y
+		Y.append(ppd.loc[sid,date].pay)
+	return np.array(X),np.array(Y)
 
-train_X,train_Y=creatData(ppd)
-np.save('train_X',train_X)
-# np.save('train_X2',train_X)
-np.save('train_Y',train_Y)
-
+train_X,train_Y=createData(ppd,shovpd,shoppd)
+clf = Lasso()
+clf.fit(train_X,train_Y)
+select = np.array(clf.coef_)
+train_X = train_X.T[np.where(select!=0)].T
+# np.save('train_X',train_X)
+np.save('train_X2',train_X)
+# np.save('train_Y',train_Y)
+np.save('train_Y2',train_Y)
 
 # [svc.fit(X_digits[train], y_digits[train]).score(X_digits[test], y_digits[test]) for train, test in kfold] 
 
